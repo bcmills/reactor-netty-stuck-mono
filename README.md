@@ -7,6 +7,8 @@ Netty logs the failure, but the resulting Mono's subscriber sees no value,
 does not run. This example has no retry operator, Spring, or real dependency
 incompatibility.
 
+Upstream issue: [reactor/reactor-netty#4407](https://github.com/reactor/reactor-netty/issues/4407).
+
 ## Run
 
 Requires JDK 17+ and internet access on the first run for the Gradle wrapper
