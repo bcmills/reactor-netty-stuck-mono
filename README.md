@@ -19,7 +19,7 @@ and public Maven Central dependencies:
 The expected summary, after Netty's `exceptionCaught()` warning, is:
 
 ```text
-signal=none uncaught=false
+signal=none doFinally=none uncaught=false
 ```
 
 The warning and summary were reproduced with the versions listed below on
@@ -28,6 +28,8 @@ JDK 21/macOS; the Netty transport resolved to 4.2.18.Final.
 The program checks that the server received a request and fails if the Mono
 produces a signal or an uncaught exception. The two-second wait demonstrates
 the absence of a signal *during that interval*, not a proof of an infinite hang.
+`doFinally` is attached after the HTTP Mono to observe whether its subscription
+terminates or is cancelled, even if the subscriber receives no terminal signal.
 `src/main/resources/simplelogger.properties` keeps Netty's warning visible but
 silences duplicate Reactor logs; remove it to inspect all logs.
 

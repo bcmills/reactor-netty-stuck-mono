@@ -2,6 +2,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.SignalType;
 import reactor.netty.DisposableServer;
 import reactor.netty.http.client.HttpClient;
 import reactor.netty.http.server.HttpServer;
@@ -24,6 +25,7 @@ public final class UnresolvedMonoRepro {
     Thread.setDefaultUncaughtExceptionHandler((thread, error) -> uncaught.set(error));
     try {
       AtomicReference<String> signal = new AtomicReference<>("none");
+      AtomicReference<SignalType> finallySignal = new AtomicReference<>();
       CountDownLatch signalled = new CountDownLatch(1);
       HttpClient.create()
           .get()
@@ -31,6 +33,8 @@ public final class UnresolvedMonoRepro {
           .responseSingle((response, body) -> body.asString()
               // Run the simulated linkage failure during inbound response processing.
               .map(value -> { throw new NoSuchMethodError("simulated incompatible dependency"); }))
+          // Observe completion, error, or cancellation of the resulting subscription.
+          .doFinally(finallySignal::set)
           .subscribe(value -> {
             signal.set("value");
             signalled.countDown();
@@ -47,7 +51,9 @@ public final class UnresolvedMonoRepro {
       }
       // This wait observes signals; it does not add a timeout to the client's Mono.
       signalled.await(2, TimeUnit.SECONDS);
-      System.out.println("signal=" + signal.get() + " uncaught=" + (uncaught.get() != null));
+      System.out.println("signal=" + signal.get() + " doFinally="
+          + (finallySignal.get() == null ? "none" : finallySignal.get())
+          + " uncaught=" + (uncaught.get() != null));
       if (!"none".equals(signal.get()) || uncaught.get() != null) {
         throw new AssertionError("Expected no signal or uncaught exception");
       }
