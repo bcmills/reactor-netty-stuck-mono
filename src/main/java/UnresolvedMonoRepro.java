@@ -22,7 +22,11 @@ public final class UnresolvedMonoRepro {
     Thread.UncaughtExceptionHandler previousHandler = Thread.getDefaultUncaughtExceptionHandler();
     AtomicReference<Throwable> uncaught = new AtomicReference<>();
     // A Java throw escaping Netty's event-loop thread would reach this handler.
-    Thread.setDefaultUncaughtExceptionHandler((thread, error) -> uncaught.set(error));
+    Thread.setDefaultUncaughtExceptionHandler((thread, error) -> {
+      uncaught.set(error);
+      System.err.println("Exception in thread \"" + thread.getName() + "\"");
+      error.printStackTrace(System.err);
+    });
     try {
       AtomicReference<String> signal = new AtomicReference<>("none");
       AtomicReference<SignalType> finallySignal = new AtomicReference<>();

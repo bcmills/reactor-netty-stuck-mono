@@ -6,25 +6,36 @@ public final class AsyncCoreMonoControl {
   public static void main(String[] args) throws InterruptedException {
     Thread.UncaughtExceptionHandler previousHandler = Thread.getDefaultUncaughtExceptionHandler();
     AtomicReference<Throwable> uncaught = new AtomicReference<>();
-    Thread.setDefaultUncaughtExceptionHandler((thread, error) -> uncaught.set(error));
+    Thread.setDefaultUncaughtExceptionHandler((thread, error) -> {
+      uncaught.set(error);
+      System.err.println("Exception in thread \"" + thread.getName() + "\"");
+      error.printStackTrace(System.err);
+    });
     try {
       AtomicReference<String> signal = new AtomicReference<>("none");
       AtomicReference<SignalType> finallySignal = new AtomicReference<>();
       AtomicReference<Throwable> signalledError = new AtomicReference<>();
       AtomicReference<Thread> producer = new AtomicReference<>();
-      NoSuchMethodError failure = new NoSuchMethodError("simulated incompatible dependency");
+      AtomicReference<NoSuchMethodError> failure = new AtomicReference<>();
       Mono.<String>create(sink -> {
             // Emit on a plain Java thread with no task/error wrapper.
             Thread thread = new Thread(() -> sink.success("ok"), "core-mono-control");
             producer.set(thread);
             thread.start();
           })
-          .map(value -> { throw failure; })
+          .map(value -> {
+            // Capture the producer's active operator/emission call path in the stack trace.
+            NoSuchMethodError error = new NoSuchMethodError("simulated incompatible dependency");
+            failure.set(error);
+            throw error;
+          })
           .doFinally(finallySignal::set)
           .subscribe(value -> signal.set("value"),
               error -> {
                 signalledError.set(error);
                 signal.set("onError");
+                System.err.println("Mono subscriber received onError:");
+                error.printStackTrace(System.err);
               },
               () -> signal.set("onComplete"));
 
@@ -38,7 +49,7 @@ public final class AsyncCoreMonoControl {
           + (finallySignal.get() == null ? "none" : finallySignal.get())
           + " uncaught=" + (uncaught.get() != null));
       if (!"onError".equals(signal.get()) || finallySignal.get() != SignalType.ON_ERROR
-          || signalledError.get() != failure || uncaught.get() != null) {
+          || failure.get() == null || signalledError.get() != failure.get() || uncaught.get() != null) {
         throw new AssertionError("Expected the original fatal error in onError and doFinally");
       }
     } finally {

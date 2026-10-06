@@ -18,7 +18,7 @@ and public Maven Central dependencies:
 ./gradlew --no-daemon -q run
 ```
 
-The expected summary, after Netty's `exceptionCaught()` warning, is:
+The expected summary, after Reactor and Netty's warning and error logs, is:
 
 ```text
 signal=none doFinally=none uncaught=false
@@ -32,8 +32,10 @@ produces a signal or an uncaught exception. The two-second wait demonstrates
 the absence of a signal *during that interval*, not a proof of an infinite hang.
 `doFinally` is attached after the HTTP Mono to observe whether its subscription
 terminates or is cancelled, even if the subscriber receives no terminal signal.
-`src/main/resources/simplelogger.properties` keeps Netty's warning visible but
-silences duplicate Reactor logs; remove it to inspect all logs.
+`src/main/resources/simplelogger.properties` enables all warning and error logs
+on stderr, including their stack traces. Each example's default uncaught-exception
+handler also prints the thread name and full stack trace to stderr. Summaries
+remain on stdout.
 
 ## Reactor Core controls
 
@@ -50,12 +52,19 @@ default uncaught-exception handler:
 - **Synchronous** (`src/main/java/SyncCoreMonoControl.java`): `Mono.just("ok")`
   emits during `subscribe`. The original
   `NoSuchMethodError` escapes to the caller, which catches it for the assertion.
-  The subscriber and `doFinally` receive no signal.
+  The catch prints `Mono.subscribe threw to its caller:` and the stack trace to
+  stderr. The control constructs the error inside `map` so its trace includes
+  the active operator and `subscribe` call path. The trace records where the
+  error was constructed; rethrows do not add new frames. The subscriber and
+  `doFinally` receive no signal.
 - **Asynchronous** (`src/main/java/AsyncCoreMonoControl.java`): `Mono.create`
   emits `"ok"` from a plain Java thread through
   `MonoSink.success`. The subscriber receives the original `NoSuchMethodError`
   through `onError`, and `doFinally` runs with `onError`. The control joins the
-  producer thread before checking the results.
+  producer thread before checking the results. It constructs the error inside
+  `map` so the trace includes the producer's operator and `MonoSink.success`
+  call path. The error callback prints `Mono subscriber received onError:` and
+  the stack trace to stderr.
 
 To run either control separately:
 
@@ -64,7 +73,7 @@ To run either control separately:
 ./gradlew --no-daemon -q runCoreAsyncControl
 ```
 
-Expected output:
+Expected stdout summaries (warning and error logs go to stderr):
 
 ```text
 core-sync signal=none doFinally=none uncaught=false thrown=true
