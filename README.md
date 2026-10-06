@@ -35,6 +35,57 @@ terminates or is cancelled, even if the subscriber receives no terminal signal.
 `src/main/resources/simplelogger.properties` keeps Netty's warning visible but
 silences duplicate Reactor logs; remove it to inspect all logs.
 
+## Reactor Core controls
+
+Run the non-Netty controls with the same Reactor Core version:
+
+```sh
+./gradlew --no-daemon -q runCoreControl
+```
+
+Each control has its own source file and runnable task. Both apply the same
+throwing `map` callback, subscriber callbacks, `doFinally` observation, and
+default uncaught-exception handler:
+
+- **Synchronous** (`src/main/java/SyncCoreMonoControl.java`): `Mono.just("ok")`
+  emits during `subscribe`. The original
+  `NoSuchMethodError` escapes to the caller, which catches it for the assertion.
+  The subscriber and `doFinally` receive no signal.
+- **Asynchronous** (`src/main/java/AsyncCoreMonoControl.java`): `Mono.create`
+  emits `"ok"` from a plain Java thread through
+  `MonoSink.success`. The subscriber receives the original `NoSuchMethodError`
+  through `onError`, and `doFinally` runs with `onError`. The control joins the
+  producer thread before checking the results.
+
+To run either control separately:
+
+```sh
+./gradlew --no-daemon -q runCoreSyncControl
+./gradlew --no-daemon -q runCoreAsyncControl
+```
+
+Expected output:
+
+```text
+core-sync signal=none doFinally=none uncaught=false thrown=true
+core-async signal=onError doFinally=onError uncaught=false
+```
+
+Both cases assert the error's identity, so wrapping or substituting an error
+fails the control. The control code uses only Reactor Core and Java APIs.
+
+These cases distinguish the lack of a terminal signal from the loss of the
+Java throw. The synchronous control shares the HTTP example's lack of signals,
+but its caller receives the fatal error. The asynchronous control terminates
+with an error signal. Neither has the HTTP example's combination of no signal
+and no escaped error.
+
+The result depends on the source's execution boundary. In Reactor Core 3.8.7,
+[`MonoSink.success` catches a downstream throw and calls `onError`](https://github.com/reactor/reactor-core/blob/v3.8.7/reactor-core/src/main/java/reactor/core/publisher/MonoCreate.java#L174-L185),
+even though the `map` operator treats this error as fatal and rethrows it.
+These controls do not establish how every Core source or scheduler handles
+fatal errors.
+
 ## Mechanism and scope
 
 The throw occurs in a response-body `map` callback on Netty's event loop.

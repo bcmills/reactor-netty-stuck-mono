@@ -17,6 +17,21 @@ application {
     mainClass = 'UnresolvedMonoRepro'
 }
 
+tasks.register('runCoreSyncControl', JavaExec) {
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'SyncCoreMonoControl'
+}
+
+tasks.register('runCoreAsyncControl', JavaExec) {
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'AsyncCoreMonoControl'
+    mustRunAfter 'runCoreSyncControl'
+}
+
+tasks.register('runCoreControl') {
+    dependsOn 'runCoreSyncControl', 'runCoreAsyncControl'
+}
+
 tasks.withType(JavaCompile).configureEach {
     options.release = 17
 }
