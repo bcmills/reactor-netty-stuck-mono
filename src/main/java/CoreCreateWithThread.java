@@ -2,7 +2,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.SignalType;
 
-public final class AsyncCoreMonoControl {
+public final class CoreCreateWithThread {
   public static void main(String[] args) throws InterruptedException {
     Thread.UncaughtExceptionHandler previousHandler = Thread.getDefaultUncaughtExceptionHandler();
     AtomicReference<Throwable> uncaught = new AtomicReference<>();

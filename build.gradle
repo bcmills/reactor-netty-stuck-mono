@@ -14,22 +14,45 @@ dependencies {
 }
 
 application {
-    mainClass = 'UnresolvedMonoRepro'
+    mainClass = 'NettyEventLoop'
 }
 
-tasks.register('runCoreSyncControl', JavaExec) {
+tasks.register('runNettyEventLoop', JavaExec) {
     classpath = sourceSets.main.runtimeClasspath
-    mainClass = 'SyncCoreMonoControl'
+    mainClass = 'NettyEventLoop'
 }
 
-tasks.register('runCoreAsyncControl', JavaExec) {
+tasks.register('runCoreSyncSubscribe', JavaExec) {
     classpath = sourceSets.main.runtimeClasspath
-    mainClass = 'AsyncCoreMonoControl'
-    mustRunAfter 'runCoreSyncControl'
+    mainClass = 'CoreSyncSubscribe'
 }
 
-tasks.register('runCoreControl') {
-    dependsOn 'runCoreSyncControl', 'runCoreAsyncControl'
+tasks.register('runCoreCreateWithThread', JavaExec) {
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'CoreCreateWithThread'
+    mustRunAfter 'runCoreSyncSubscribe'
+}
+
+tasks.register('runCorePublishOnSchedulerDefault', JavaExec) {
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'CorePublishOnSchedulerDefault'
+    mustRunAfter 'runCoreCreateWithThread'
+}
+
+tasks.register('runCorePublishOnSchedulerWithThread', JavaExec) {
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'CorePublishOnSchedulerWithThread'
+    mustRunAfter 'runCorePublishOnSchedulerDefault'
+}
+
+tasks.register('runNettyPublishOnSchedulerWithThread', JavaExec) {
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'NettyPublishOnSchedulerWithThread'
+}
+
+tasks.register('runCoreControls') {
+    dependsOn 'runCoreSyncSubscribe', 'runCoreCreateWithThread',
+            'runCorePublishOnSchedulerDefault', 'runCorePublishOnSchedulerWithThread'
 }
 
 tasks.withType(JavaCompile).configureEach {

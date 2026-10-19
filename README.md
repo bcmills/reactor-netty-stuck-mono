@@ -15,8 +15,13 @@ Requires JDK 17+ and internet access on the first run for the Gradle wrapper
 and public Maven Central dependencies:
 
 ```sh
-./gradlew --no-daemon -q run
+./gradlew --no-daemon -q runNettyEventLoop
 ```
+
+Each Java class names the setup it checks, and its Gradle task is `run<ClassName>`.
+`SchedulerDefault` uses Core's named scheduler factory; `SchedulerWithThread`
+supplies a factory that creates ordinary Java threads. The standard `run` task
+also runs `NettyEventLoop`.
 
 The expected summary, after Reactor and Netty's warning and error logs, is:
 
@@ -42,14 +47,14 @@ remain on stdout.
 Run the non-Netty controls with the same Reactor Core version:
 
 ```sh
-./gradlew --no-daemon -q runCoreControl
+./gradlew --no-daemon -q runCoreControls
 ```
 
-Each control has its own source file and runnable task. Both apply the same
+Each control has its own source file and runnable task. All apply the same
 throwing `map` callback, subscriber callbacks, `doFinally` observation, and
 default uncaught-exception handler:
 
-- **Synchronous** (`src/main/java/SyncCoreMonoControl.java`): `Mono.just("ok")`
+- **Synchronous** (`src/main/java/CoreSyncSubscribe.java`): `Mono.just("ok")`
   emits during `subscribe`. The original
   `NoSuchMethodError` escapes to the caller, which catches it for the assertion.
   The catch prints `Mono.subscribe threw to its caller:` and the stack trace to
@@ -57,7 +62,7 @@ default uncaught-exception handler:
   the active operator and `subscribe` call path. The trace records where the
   error was constructed; rethrows do not add new frames. The subscriber and
   `doFinally` receive no signal.
-- **Asynchronous** (`src/main/java/AsyncCoreMonoControl.java`): `Mono.create`
+- **Asynchronous** (`src/main/java/CoreCreateWithThread.java`): `Mono.create`
   emits `"ok"` from a plain Java thread through
   `MonoSink.success`. The subscriber receives the original `NoSuchMethodError`
   through `onError`, and `doFinally` runs with `onError`. The control joins the
@@ -65,12 +70,30 @@ default uncaught-exception handler:
   `map` so the trace includes the producer's operator and `MonoSink.success`
   call path. The error callback prints `Mono subscriber received onError:` and
   the stack trace to stderr.
+- **With `publishOn` and Core's logging handler**
+  (`src/main/java/CorePublishOnSchedulerDefault.java`):
+  `Mono.create` emits from a plain Java thread after `subscribe` returns, and
+  `publishOn(Schedulers.newSingle(...))` moves the failing `map` to a scheduler
+  thread. The scheduler logs the fatal error, but neither the subscriber nor
+  `doFinally` receives a signal. This tests the
+  [maintainer's scenario](https://github.com/reactor/reactor-netty/issues/4407#issuecomment-6058013320).
+  After joining the producer, the control queues a marker task on the same
+  single-thread scheduler and waits for it. That establishes that the failing
+  emission and scheduler error handling have finished before checking signals.
+- **With `publishOn` and ordinary Java threads**
+  (`src/main/java/CorePublishOnSchedulerWithThread.java`): the same scheduled
+  failure reaches the JVM default uncaught-exception handler. This control
+  supplies a `ThreadFactory` instead of using Core's named scheduler factory.
+  Neither the subscriber nor `doFinally` receives a signal; the control checks
+  that the handler received the original error object.
 
-To run either control separately:
+To run a control separately:
 
 ```sh
-./gradlew --no-daemon -q runCoreSyncControl
-./gradlew --no-daemon -q runCoreAsyncControl
+./gradlew --no-daemon -q runCoreSyncSubscribe
+./gradlew --no-daemon -q runCoreCreateWithThread
+./gradlew --no-daemon -q runCorePublishOnSchedulerDefault
+./gradlew --no-daemon -q runCorePublishOnSchedulerWithThread
 ```
 
 Expected stdout summaries (warning and error logs go to stderr):
@@ -78,22 +101,89 @@ Expected stdout summaries (warning and error logs go to stderr):
 ```text
 core-sync signal=none doFinally=none uncaught=false thrown=true
 core-async signal=onError doFinally=onError uncaught=false
+core-publish-on signal=none doFinally=none uncaught=false
+core-publish-on-handler signal=none doFinally=none uncaught=true
 ```
 
-Both cases assert the error's identity, so wrapping or substituting an error
-fails the control. The control code uses only Reactor Core and Java APIs.
+The synchronous and direct-emission asynchronous cases assert the error's
+identity, so wrapping or substituting an error fails those controls. The
+`publishOn` control checks that the failing `map` actually ran and that no
+subscriber signal, `doFinally`, or default uncaught-handler call followed.
+The control code uses only Reactor Core and Java APIs.
 
 These cases distinguish the lack of a terminal signal from the loss of the
 Java throw. The synchronous control shares the HTTP example's lack of signals,
 but its caller receives the fatal error. The asynchronous control terminates
-with an error signal. Neither has the HTTP example's combination of no signal
-and no escaped error.
+with an error signal. Adding `publishOn` reproduces the HTTP example's observable
+combination of no signal and no default uncaught-handler call. The lack of
+terminal signals is therefore also reproducible with Reactor Core alone.
 
 The result depends on the source's execution boundary. In Reactor Core 3.8.7,
 [`MonoSink.success` catches a downstream throw and calls `onError`](https://github.com/reactor/reactor-core/blob/v3.8.7/reactor-core/src/main/java/reactor/core/publisher/MonoCreate.java#L174-L185),
 even though the `map` operator treats this error as fatal and rethrows it.
-These controls do not establish how every Core source or scheduler handles
-fatal errors.
+
+`uncaught` measures calls to the **JVM default** uncaught-exception handler,
+not every thread-specific handler. Core's `newSingle` scheduler
+[installs its own handler](https://github.com/reactor/reactor-core/blob/v3.8.7/reactor-core/src/main/java/reactor/core/scheduler/ReactorThreadFactory.java#L56-L77).
+[`SchedulerTask` catches the throw](https://github.com/reactor/reactor-core/blob/v3.8.7/reactor-core/src/main/java/reactor/core/scheduler/SchedulerTask.java#L71-L76)
+and [`Schedulers.handleError` invokes the thread's handler, which logs the error](https://github.com/reactor/reactor-core/blob/v3.8.7/reactor-core/src/main/java/reactor/core/scheduler/Schedulers.java#L1277-L1288).
+Thus `uncaught=false` in this control does **not** mean no uncaught-exception
+handler ran. It also does not mean the scheduler thread died: the later marker
+task demonstrates that it continued processing work. These controls do not
+establish how every Core source or scheduler handles fatal errors.
+
+## Error boundaries and caller-controlled reporting
+
+The original HTTP reproducer uses **Netty's channel pipeline**, not Reactor's
+`SchedulerTask`, as the boundary around the throwing callback. Reactor Netty
+[`ChannelOperationsHandler.channelRead` catches the throw, logs it, closes the
+channel, and invokes `exceptionCaught`](https://github.com/reactor/reactor-netty/blob/v1.3.7/reactor-netty-core/src/main/java/reactor/netty/channel/ChannelOperationsHandler.java#L138-L158).
+Netty's [`fireChannelRead` catches the resulting throw](https://github.com/netty/netty/blob/netty-4.2.18.Final/transport/src/main/java/io/netty/channel/AbstractChannelHandlerContext.java#L341-L360)
+and [`invokeExceptionCaught` catches and logs a further throw from that handler](https://github.com/netty/netty/blob/netty-4.2.18.Final/transport/src/main/java/io/netty/channel/AbstractChannelHandlerContext.java#L287-L303).
+The original runtime trace passes through `channelRead` and Netty's I/O loop;
+the Core `publishOn` trace instead passes through `MonoPublishOn.run` and
+`SchedulerTask.call`. The two cases have analogous asynchronous boundaries
+and share Core's fatal-error rethrow behavior, but the final catches differ.
+
+Core exposes a way to control its scheduler's handler delivery:
+
+```java
+Scheduler scheduler = Schedulers.newSingle(task -> new Thread(task, "caller-worker"));
+```
+
+[`newSingle(ThreadFactory)` uses the caller's factory](https://github.com/reactor/reactor-core/blob/v3.8.7/reactor-core/src/main/java/reactor/core/scheduler/Schedulers.java#L585-L597).
+With no explicit thread handler, the ordinary thread's `ThreadGroup` delegates
+to the JVM default uncaught-exception handler. `Schedulers.handleError` invokes
+that handler with the original fatal error. This is **handler notification**:
+the scheduler still catches the throw, the worker continues, and the Mono still
+does not terminate. It does not rethrow on the subscribing thread or inherently
+terminate the worker or process.
+
+The same technique works for the throwing HTTP callback in this repo:
+
+```sh
+./gradlew --no-daemon -q runNettyPublishOnSchedulerWithThread
+```
+
+`src/main/java/NettyPublishOnSchedulerWithThread.java` inserts `publishOn(scheduler)`
+inside `responseSingle`, between `body.asString()` and the throwing `map`.
+The resulting summary is:
+
+```text
+netty-publish-on-handler signal=none doFinally=none uncaught=true
+```
+
+The fatal-error trace now contains `MonoPublishOn.run` and `SchedulerTask.call`,
+and the default handler receives the original error. Placing `publishOn` only
+after `responseSingle` would be too late for a failure inside its body callback.
+This technique does not cover failures upstream of the boundary, such as an
+exception in a Netty HTTP/Brotli decoder. The original production decoder
+failure is not reproduced here, so this is not evidence of a fix for it.
+
+If a terminal `onError` signal is required instead, the failing function can
+explicitly catch `NoSuchMethodError` and wrap it in a non-fatal exception before
+Core sees it. That changes the fatal-error policy and is separate from handler
+delivery; the handler controls preserve the original fatal error unchanged.
 
 ## Mechanism and scope
 

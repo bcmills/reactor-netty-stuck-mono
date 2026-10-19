@@ -2,7 +2,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.SignalType;
 
-public final class SyncCoreMonoControl {
+public final class CoreSyncSubscribe {
   public static void main(String[] args) {
     Thread.UncaughtExceptionHandler previousHandler = Thread.getDefaultUncaughtExceptionHandler();
     AtomicReference<Throwable> uncaught = new AtomicReference<>();

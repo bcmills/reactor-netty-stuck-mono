@@ -7,7 +7,7 @@ import reactor.netty.DisposableServer;
 import reactor.netty.http.client.HttpClient;
 import reactor.netty.http.server.HttpServer;
 
-public final class UnresolvedMonoRepro {
+public final class NettyEventLoop {
   public static void main(String[] args) throws InterruptedException {
     CountDownLatch requestReceived = new CountDownLatch(1);
     DisposableServer server = HttpServer.create()
