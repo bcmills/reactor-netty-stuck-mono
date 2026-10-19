@@ -27,10 +27,16 @@ tasks.register('runCoreSyncSubscribe', JavaExec) {
     mainClass = 'CoreSyncSubscribe'
 }
 
+tasks.register('runCoreDefer', JavaExec) {
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'CoreDefer'
+    mustRunAfter 'runCoreSyncSubscribe'
+}
+
 tasks.register('runCoreCreate', JavaExec) {
     classpath = sourceSets.main.runtimeClasspath
     mainClass = 'CoreCreate'
-    mustRunAfter 'runCoreSyncSubscribe'
+    mustRunAfter 'runCoreDefer'
 }
 
 tasks.register('runCorePublishOnSchedulerDefault', JavaExec) {
@@ -76,7 +82,7 @@ tasks.register('runCorePublishOnSchedulerErrorHook', JavaExec) {
 }
 
 tasks.register('runCoreControls') {
-    dependsOn 'runCoreSyncSubscribe', 'runCoreCreate',
+    dependsOn 'runCoreSyncSubscribe', 'runCoreDefer', 'runCoreCreate',
             'runCorePublishOnSchedulerDefault', 'runCorePublishOnSchedulerWithThread',
             'runCorePublishOnSchedulerErrorHook'
 }

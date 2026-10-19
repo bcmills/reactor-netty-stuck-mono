@@ -63,6 +63,11 @@ Each observes the error-delivery mechanism relevant to that case:
   the active operator and `subscribe` call path. The trace records where the
   error was constructed; rethrows do not add new frames. The subscriber and
   `doFinally` receive no signal.
+- **`Mono.defer`** (`src/main/java/CoreDefer.java`):
+  `Mono.defer(() -> Mono.just("ok"))` creates the inner Mono when subscribed to,
+  then subscribes to it. The same downstream `map` throws through `subscribe`
+  to the caller, as in the `Mono.just` case. Neither the subscriber callbacks
+  nor `doFinally` run.
 - **`Mono.create`** (`src/main/java/CoreCreate.java`):
   `Mono.create(sink -> sink.success("ok"))` also emits during `subscribe`, but
   `MonoSink.success` catches the fatal error thrown by `map`. The subscriber
@@ -96,6 +101,7 @@ To run a control separately:
 
 ```sh
 ./gradlew --no-daemon -q runCoreSyncSubscribe
+./gradlew --no-daemon -q runCoreDefer
 ./gradlew --no-daemon -q runCoreCreate
 ./gradlew --no-daemon -q runCorePublishOnSchedulerDefault
 ./gradlew --no-daemon -q runCorePublishOnSchedulerWithThread
@@ -106,6 +112,7 @@ Expected stdout summaries (warning and error logs go to stderr):
 
 ```text
 core-sync signal=none doFinally=none thrown=true
+core-defer signal=none doFinally=none thrown=true
 core-create signal=onError doFinally=onError
 core-publish-on signal=none doFinally=none uncaught=false
 core-publish-on-handler signal=none doFinally=none uncaught=true
@@ -113,9 +120,9 @@ core-publish-on-error-hook signal=none doFinally=none errorHook=true
 ```
 
 The checks focus on subscription signals, `doFinally`, and where the fatal
-error is reported. The `Mono.just` and direct-emission `Mono.create` cases do
-not install a default uncaught-exception handler: they check the caller's catch
-and the subscriber's `onError`, respectively. The default-scheduler control also
+error is reported. The `Mono.just` and `Mono.defer` cases check the caller's
+catch; `Mono.create` checks the subscriber's `onError`. These three cases do
+not install a default uncaught-exception handler. The default-scheduler control also
 checks that the failing `map` actually ran, so silent non-execution cannot pass
 as a missing signal. The control code uses only Reactor Core and Java APIs.
 
@@ -138,6 +145,11 @@ terminal signals is therefore also reproducible with Reactor Core alone.
 The result depends on the source's execution boundary. In Reactor Core 3.8.7,
 [`MonoSink.success` catches a downstream throw and calls `onError`](https://github.com/reactor/reactor-core/blob/v3.8.7/reactor-core/src/main/java/reactor/core/publisher/MonoCreate.java#L174-L185),
 even though the `map` operator treats this error as fatal and rethrows it.
+[`Mono.defer` catches errors from its supplier, then subscribes to the returned
+Mono outside that catch](https://github.com/reactor/reactor-core/blob/v3.8.7/reactor-core/src/main/java/reactor/core/publisher/MonoDefer.java#L42-L54).
+It does not add a catch around the downstream `map`. This control deliberately
+returns `Mono.just`; returning `Mono.create` instead would retain that source's
+`MonoSink.success` behavior.
 
 `uncaught` measures calls to the **JVM default** uncaught-exception handler,
 not every thread-specific handler. Core's `newSingle` scheduler
