@@ -9,35 +9,36 @@ import reactor.netty.http.server.HttpServer;
 
 public final class NettyEventLoop {
   public static void main(String[] args) throws InterruptedException {
-    CountDownLatch requestReceived = new CountDownLatch(1);
     DisposableServer server = HttpServer.create()
         .host("127.0.0.1")
         .port(0)
-        .handle((request, response) -> {
-          requestReceived.countDown();
-          return response.sendString(Mono.just("ok"));
-        })
+        .handle((request, response) -> response.sendString(Mono.just("ok")))
         .bindNow();
 
     Thread.UncaughtExceptionHandler previousHandler = Thread.getDefaultUncaughtExceptionHandler();
     AtomicReference<Throwable> uncaught = new AtomicReference<>();
-    // A Java throw escaping Netty's event-loop thread would reach this handler.
+    // If the error escapes Netty's event-loop thread, this handler receives it.
     Thread.setDefaultUncaughtExceptionHandler((thread, error) -> {
       uncaught.set(error);
-      System.err.println("Exception in thread \"" + thread.getName() + "\"");
+      System.err.println("Default uncaught-exception handler received an error on thread \""
+          + thread.getName() + "\":");
       error.printStackTrace(System.err);
     });
+
     try {
       AtomicReference<String> signal = new AtomicReference<>("none");
       AtomicReference<SignalType> finallySignal = new AtomicReference<>();
+      CountDownLatch mapCalled = new CountDownLatch(1);
       CountDownLatch signalled = new CountDownLatch(1);
+
       HttpClient.create()
           .get()
           .uri("http://127.0.0.1:" + server.port())
           .responseSingle((response, body) -> body.asString()
-              // Run the simulated linkage failure during inbound response processing.
-              .map(value -> { throw new NoSuchMethodError("simulated incompatible dependency"); }))
-          // Observe completion, error, or cancellation of the resulting subscription.
+              .map(value -> {
+                mapCalled.countDown();
+                throw new NoSuchMethodError("simulated dependency lacks the required method");
+              }))
           .doFinally(finallySignal::set)
           .subscribe(value -> {
             signal.set("value");
@@ -50,16 +51,21 @@ public final class NettyEventLoop {
             signalled.countDown();
           });
 
-      if (!requestReceived.await(5, TimeUnit.SECONDS)) {
-        throw new AssertionError("The loopback server did not receive the request");
+      // Check that map ran before checking whether the subscriber received anything.
+      if (!mapCalled.await(5, TimeUnit.SECONDS)) {
+        throw new AssertionError("The failing map callback did not run");
       }
-      // This wait observes signals; it does not add a timeout to the client's Mono.
+
+      // Wait to see whether the subscriber receives anything; do not time out the Mono itself.
       signalled.await(2, TimeUnit.SECONDS);
+
       System.out.println("signal=" + signal.get() + " doFinally="
           + (finallySignal.get() == null ? "none" : finallySignal.get())
           + " uncaught=" + (uncaught.get() != null));
-      if (!"none".equals(signal.get()) || uncaught.get() != null) {
-        throw new AssertionError("Expected no signal or uncaught exception");
+
+      if (!"none".equals(signal.get()) || finallySignal.get() != null || uncaught.get() != null) {
+        throw new AssertionError("Expected subscriber callbacks, doFinally,"
+            + " and the default uncaught-exception handler not to run");
       }
     } finally {
       server.disposeNow();

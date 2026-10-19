@@ -32,8 +32,9 @@ signal=none doFinally=none uncaught=false
 The warning and summary were reproduced with the versions listed below on
 JDK 21/macOS; the Netty transport resolved to 4.2.18.Final.
 
-The program checks that the server received a request and fails if the Mono
-produces a signal or an uncaught exception. The two-second wait demonstrates
+The program checks that the failing response-body callback ran and fails if
+the Mono produces a signal, invokes `doFinally`, or reports an uncaught exception.
+The two-second wait demonstrates
 the absence of a signal *during that interval*, not a proof of an infinite hang.
 `doFinally` is attached after the HTTP Mono to observe whether its subscription
 terminates or is cancelled, even if the subscriber receives no terminal signal.
@@ -52,10 +53,9 @@ Run the non-Netty controls with the same Reactor Core version:
 
 Each control has its own source file and runnable task. All apply the same
 throwing `map` callback, subscriber callbacks, and `doFinally` observation.
-They observe errors through the default uncaught-exception handler or a
-scheduler error hook:
+Each observes the error-delivery mechanism relevant to that case:
 
-- **Synchronous** (`src/main/java/CoreSyncSubscribe.java`): `Mono.just("ok")`
+- **`Mono.just`** (`src/main/java/CoreSyncSubscribe.java`): `Mono.just("ok")`
   emits during `subscribe`. The original
   `NoSuchMethodError` escapes to the caller, which catches it for the assertion.
   The catch prints `Mono.subscribe threw to its caller:` and the stack trace to
@@ -63,22 +63,20 @@ scheduler error hook:
   the active operator and `subscribe` call path. The trace records where the
   error was constructed; rethrows do not add new frames. The subscriber and
   `doFinally` receive no signal.
-- **Asynchronous** (`src/main/java/CoreCreateWithThread.java`): `Mono.create`
-  emits `"ok"` from a plain Java thread through
-  `MonoSink.success`. The subscriber receives the original `NoSuchMethodError`
-  through `onError`, and `doFinally` runs with `onError`. The control joins the
-  producer thread before checking the results. It constructs the error inside
-  `map` so the trace includes the producer's operator and `MonoSink.success`
-  call path. The error callback prints `Mono subscriber received onError:` and
-  the stack trace to stderr.
+- **`Mono.create`** (`src/main/java/CoreCreate.java`):
+  `Mono.create(sink -> sink.success("ok"))` also emits during `subscribe`, but
+  `MonoSink.success` catches the fatal error thrown by `map`. The subscriber
+  receives it through `onError`, and `doFinally` runs with `onError`. The error
+  callback prints `Subscriber received an error through onError:` and the stack trace to
+  stderr. No extra thread is needed to demonstrate this source-specific behavior.
 - **With `publishOn` and Core's logging handler**
   (`src/main/java/CorePublishOnSchedulerDefault.java`):
-  `Mono.create` emits from a plain Java thread after `subscribe` returns, and
+  `Mono.create(sink -> sink.success("ok"))` emits during `subscribe`, and
   `publishOn(Schedulers.newSingle(...))` moves the failing `map` to a scheduler
   thread. The scheduler logs the fatal error, but neither the subscriber nor
   `doFinally` receives a signal. This tests the
   [maintainer's scenario](https://github.com/reactor/reactor-netty/issues/4407#issuecomment-6058013320).
-  After joining the producer, the control queues a marker task on the same
+  After emitting, the control queues a marker task on the same
   single-thread scheduler and waits for it. That establishes that the failing
   emission and scheduler error handling have finished before checking signals.
 - **With `publishOn` and ordinary Java threads**
@@ -86,7 +84,7 @@ scheduler error hook:
   failure reaches the JVM default uncaught-exception handler. This control
   supplies a `ThreadFactory` instead of using Core's named scheduler factory.
   Neither the subscriber nor `doFinally` receives a signal; the control checks
-  that the handler received the original error object.
+  that the handler received a `NoSuchMethodError`.
 - **With `publishOn` and a scheduler error hook**
   (`src/main/java/CorePublishOnSchedulerErrorHook.java`): Core's named scheduler
   retains its usual logging handler, while a keyed `Schedulers.onHandleError`
@@ -98,7 +96,7 @@ To run a control separately:
 
 ```sh
 ./gradlew --no-daemon -q runCoreSyncSubscribe
-./gradlew --no-daemon -q runCoreCreateWithThread
+./gradlew --no-daemon -q runCoreCreate
 ./gradlew --no-daemon -q runCorePublishOnSchedulerDefault
 ./gradlew --no-daemon -q runCorePublishOnSchedulerWithThread
 ./gradlew --no-daemon -q runCorePublishOnSchedulerErrorHook
@@ -107,22 +105,32 @@ To run a control separately:
 Expected stdout summaries (warning and error logs go to stderr):
 
 ```text
-core-sync signal=none doFinally=none uncaught=false thrown=true
-core-async signal=onError doFinally=onError uncaught=false
+core-sync signal=none doFinally=none thrown=true
+core-create signal=onError doFinally=onError
 core-publish-on signal=none doFinally=none uncaught=false
 core-publish-on-handler signal=none doFinally=none uncaught=true
 core-publish-on-error-hook signal=none doFinally=none errorHook=true
 ```
 
-The synchronous and direct-emission asynchronous cases assert the error's
-identity, so wrapping or substituting an error fails those controls. The
-`publishOn` control checks that the failing `map` actually ran and that no
-subscriber signal, `doFinally`, or default uncaught-handler call followed.
-The control code uses only Reactor Core and Java APIs.
+The checks focus on subscription signals, `doFinally`, and where the fatal
+error is reported. The `Mono.just` and direct-emission `Mono.create` cases do
+not install a default uncaught-exception handler: they check the caller's catch
+and the subscriber's `onError`, respectively. The default-scheduler control also
+checks that the failing `map` actually ran, so silent non-execution cannot pass
+as a missing signal. The control code uses only Reactor Core and Java APIs.
+
+Each scheduler case queues another task on the same single-thread scheduler
+after subscribing, then waits for that task to run using `schedulerDrained`.
+The scheduler runs that task after the publisher task finishes handling the
+error. Without this wait, the main thread could check the results before the
+publisher calls any callbacks or handlers. No extra
+producer thread or externally captured sink is needed in the Core `publishOn`
+cases: the source emits during `subscribe`, and the scheduler provides the
+asynchronous boundary for the failing `map`.
 
 These cases distinguish the lack of a terminal signal from the loss of the
-Java throw. The synchronous control shares the HTTP example's lack of signals,
-but its caller receives the fatal error. The asynchronous control terminates
+Java throw. The `Mono.just` control shares the HTTP example's lack of signals,
+but its caller receives the fatal error. The `Mono.create` control terminates
 with an error signal. Adding `publishOn` reproduces the HTTP example's observable
 combination of no signal and no default uncaught-handler call. The lack of
 terminal signals is therefore also reproducible with Reactor Core alone.
@@ -140,6 +148,53 @@ Thus `uncaught=false` in this control does **not** mean no uncaught-exception
 handler ran. It also does not mean the scheduler thread died: the later marker
 task demonstrates that it continued processing work. These controls do not
 establish how every Core source or scheduler handles fatal errors.
+
+## Netty controls
+
+Run the Netty cases together:
+
+```sh
+./gradlew --no-daemon -q runNettyControls
+```
+
+Each uses the same loopback response and throws from the response-body `map`.
+They differ in where `map` runs and how the application watches for the error:
+
+| Class | Where `map` runs | How the application watches for the error | Observed result |
+| --- | --- | --- | --- |
+| `NettyEventLoop` | Netty event loop | JVM default handler | Handler does not run |
+| `NettyEventLoopErrorHook` | Netty event loop | `Schedulers.onHandleError` | Hook does not run |
+| `NettyPublishOnSchedulerDefault` | Core's named scheduler | JVM default handler | Handler does not run; Core logs the error |
+| `NettyPublishOnSchedulerWithThread` | Scheduler with ordinary Java threads | JVM default handler | Handler receives `NoSuchMethodError` |
+| `NettyPublishOnSchedulerErrorHook` | Core's named scheduler | `Schedulers.onHandleError` | Hook receives `NoSuchMethodError`; Core also logs the error |
+
+None calls the subscriber callbacks or `doFinally` during its check. Registering
+the scheduler hook alone does not catch the original failure: Netty catches it
+inside its channel pipeline. Moving `map` onto a Reactor scheduler lets the
+scheduler call the hook, but still does not terminate the subscription.
+
+The two event-loop cases wait until `map` runs, then check for callbacks over
+two seconds. The three scheduler cases wait until `map` or an error handler
+runs, then queue another task on that same single-thread scheduler. They wait
+for that task before checking the results, so they cannot pass merely because
+the scheduler has not run `map` yet.
+
+To run a case separately:
+
+```sh
+./gradlew --no-daemon -q runNettyEventLoop
+./gradlew --no-daemon -q runNettyEventLoopErrorHook
+./gradlew --no-daemon -q runNettyPublishOnSchedulerDefault
+./gradlew --no-daemon -q runNettyPublishOnSchedulerWithThread
+./gradlew --no-daemon -q runNettyPublishOnSchedulerErrorHook
+```
+
+The hook cases register a key they own and remove only that key in `finally`.
+`NettyPublishOnSchedulerErrorHook` uses the same default scheduler as
+`NettyPublishOnSchedulerDefault`, so their difference isolates the hook rather
+than changing the scheduler's threads. As with the Core hook case, these results
+apply to the pinned versions and to the deliberately failing callback, not to
+errors in an upstream Netty HTTP/Brotli decoder.
 
 ## Error boundaries and caller-controlled reporting
 

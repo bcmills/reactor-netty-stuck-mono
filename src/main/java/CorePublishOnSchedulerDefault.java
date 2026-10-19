@@ -1,8 +1,8 @@
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import reactor.core.publisher.Mono;
-import reactor.core.publisher.MonoSink;
 import reactor.core.publisher.SignalType;
 import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
@@ -13,54 +13,51 @@ public final class CorePublishOnSchedulerDefault {
     AtomicReference<Throwable> uncaught = new AtomicReference<>();
     Thread.setDefaultUncaughtExceptionHandler((thread, error) -> {
       uncaught.set(error);
-      System.err.println("Exception in thread \"" + thread.getName() + "\"");
+      System.err.println("Default uncaught-exception handler received an error on thread \""
+          + thread.getName() + "\":");
       error.printStackTrace(System.err);
     });
+
     Scheduler scheduler = Schedulers.newSingle("core-publish-on-control");
+
     try {
       AtomicReference<String> signal = new AtomicReference<>("none");
       AtomicReference<SignalType> finallySignal = new AtomicReference<>();
-      AtomicReference<NoSuchMethodError> failure = new AtomicReference<>();
-      AtomicReference<MonoSink<String>> sourceSink = new AtomicReference<>();
-      Mono.<String>create(sourceSink::set)
+      AtomicBoolean mapCalled = new AtomicBoolean();
+
+      Mono.<String>create(sink -> sink.success("ok"))
           .publishOn(scheduler)
           .map(value -> {
-            // Capture the scheduler's active operator/emission call path in the stack trace.
-            NoSuchMethodError error = new NoSuchMethodError("simulated incompatible dependency");
-            failure.set(error);
-            throw error;
+            mapCalled.set(true);
+            throw new NoSuchMethodError("simulated dependency lacks the required method");
           })
           .doFinally(finallySignal::set)
           .subscribe(value -> signal.set("value"),
               error -> {
                 signal.set("onError");
-                System.err.println("Mono subscriber received onError:");
+                System.err.println("Subscriber received an error through onError:");
                 error.printStackTrace(System.err);
               },
               () -> signal.set("onComplete"));
 
-      // Start emission after subscribe returns, so the failure cannot escape that call.
-      Thread producer = new Thread(() -> sourceSink.get().success("ok"), "core-mono-producer");
-      producer.start();
-      producer.join(5000);
-      if (producer.isAlive()) {
-        throw new AssertionError("The control's producer thread did not terminate");
-      }
-
-      // A later task on this single-thread scheduler runs after emission and error handling.
+      // Queue a task that runs on this scheduler thread after the publisher task finishes.
+      // Wait for it so the checks below cannot run before the error handler finishes.
       CountDownLatch schedulerDrained = new CountDownLatch(1);
       scheduler.schedule(schedulerDrained::countDown);
       if (!schedulerDrained.await(5, TimeUnit.SECONDS)) {
-        throw new AssertionError("The control's scheduler did not finish processing the emission");
+        throw new AssertionError("The scheduler did not run the task queued after the publisher");
       }
-      if (failure.get() == null) {
-        throw new AssertionError("The failing map callback did not run");
-      }
+
       System.out.println("core-publish-on signal=" + signal.get() + " doFinally="
           + (finallySignal.get() == null ? "none" : finallySignal.get())
           + " uncaught=" + (uncaught.get() != null));
+
+      if (!mapCalled.get()) {
+        throw new AssertionError("The failing map callback did not run");
+      }
       if (!"none".equals(signal.get()) || finallySignal.get() != null || uncaught.get() != null) {
-        throw new AssertionError("Expected no subscriber signal, doFinally, or default uncaught-handler call");
+        throw new AssertionError("Expected subscriber callbacks, doFinally,"
+            + " and the default uncaught-exception handler not to run");
       }
     } finally {
       scheduler.dispose();
