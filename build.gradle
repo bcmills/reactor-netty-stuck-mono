@@ -50,9 +50,16 @@ tasks.register('runNettyPublishOnSchedulerWithThread', JavaExec) {
     mainClass = 'NettyPublishOnSchedulerWithThread'
 }
 
+tasks.register('runCorePublishOnSchedulerErrorHook', JavaExec) {
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'CorePublishOnSchedulerErrorHook'
+    mustRunAfter 'runCorePublishOnSchedulerWithThread'
+}
+
 tasks.register('runCoreControls') {
     dependsOn 'runCoreSyncSubscribe', 'runCoreCreateWithThread',
-            'runCorePublishOnSchedulerDefault', 'runCorePublishOnSchedulerWithThread'
+            'runCorePublishOnSchedulerDefault', 'runCorePublishOnSchedulerWithThread',
+            'runCorePublishOnSchedulerErrorHook'
 }
 
 tasks.withType(JavaCompile).configureEach {

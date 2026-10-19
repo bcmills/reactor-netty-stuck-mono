@@ -38,9 +38,9 @@ the absence of a signal *during that interval*, not a proof of an infinite hang.
 `doFinally` is attached after the HTTP Mono to observe whether its subscription
 terminates or is cancelled, even if the subscriber receives no terminal signal.
 `src/main/resources/simplelogger.properties` enables all warning and error logs
-on stderr, including their stack traces. Each example's default uncaught-exception
-handler also prints the thread name and full stack trace to stderr. Summaries
-remain on stdout.
+on stderr, including their stack traces. The examples' default uncaught-exception
+handlers and scheduler error hook also print the thread name and full stack
+trace to stderr. Summaries remain on stdout.
 
 ## Reactor Core controls
 
@@ -51,8 +51,9 @@ Run the non-Netty controls with the same Reactor Core version:
 ```
 
 Each control has its own source file and runnable task. All apply the same
-throwing `map` callback, subscriber callbacks, `doFinally` observation, and
-default uncaught-exception handler:
+throwing `map` callback, subscriber callbacks, and `doFinally` observation.
+They observe errors through the default uncaught-exception handler or a
+scheduler error hook:
 
 - **Synchronous** (`src/main/java/CoreSyncSubscribe.java`): `Mono.just("ok")`
   emits during `subscribe`. The original
@@ -86,6 +87,12 @@ default uncaught-exception handler:
   supplies a `ThreadFactory` instead of using Core's named scheduler factory.
   Neither the subscriber nor `doFinally` receives a signal; the control checks
   that the handler received the original error object.
+- **With `publishOn` and a scheduler error hook**
+  (`src/main/java/CorePublishOnSchedulerErrorHook.java`): Core's named scheduler
+  retains its usual logging handler, while a keyed `Schedulers.onHandleError`
+  hook receives the original fatal error and prints its stack trace. This case
+  does not set a JVM default uncaught-exception handler or supply a thread
+  factory. The hook is removed by key in `finally`.
 
 To run a control separately:
 
@@ -94,6 +101,7 @@ To run a control separately:
 ./gradlew --no-daemon -q runCoreCreateWithThread
 ./gradlew --no-daemon -q runCorePublishOnSchedulerDefault
 ./gradlew --no-daemon -q runCorePublishOnSchedulerWithThread
+./gradlew --no-daemon -q runCorePublishOnSchedulerErrorHook
 ```
 
 Expected stdout summaries (warning and error logs go to stderr):
@@ -103,6 +111,7 @@ core-sync signal=none doFinally=none uncaught=false thrown=true
 core-async signal=onError doFinally=onError uncaught=false
 core-publish-on signal=none doFinally=none uncaught=false
 core-publish-on-handler signal=none doFinally=none uncaught=true
+core-publish-on-error-hook signal=none doFinally=none errorHook=true
 ```
 
 The synchronous and direct-emission asynchronous cases assert the error's
@@ -159,7 +168,23 @@ the scheduler still catches the throw, the worker continues, and the Mono still
 does not terminate. It does not rethrow on the subscribing thread or inherently
 terminate the worker or process.
 
-The same technique works for the throwing HTTP callback in this repo:
+For application-level scheduler error reporting, Reactor also provides
+[`Schedulers.onHandleError(key, hook)`](https://github.com/reactor/reactor-core/blob/v3.8.7/reactor-core/src/main/java/reactor/core/scheduler/Schedulers.java#L626-L650).
+The error-hook sample uses this purpose-built API instead of changing thread
+construction or the JVM default handler. The hook is global across Reactor
+schedulers; its key controls registration and removal, not which scheduler's
+errors it observes. Removing only the owned key preserves other registered
+hooks. In Core 3.8.7,
+[`Schedulers.handleError` invokes the hook after the thread's handler](https://github.com/reactor/reactor-core/blob/v3.8.7/reactor-core/src/main/java/reactor/core/scheduler/Schedulers.java#L1282-L1295);
+this sample verifies that the original `NoSuchMethodError` reaches it, despite
+the API Javadoc's fatal-error caveat. Core's normal error log still appears.
+Like handler delivery, the hook does not
+terminate the Mono or worker, and it does not observe failures caught solely
+inside Netty's channel pipeline. A throwing HTTP callback moved onto a Reactor
+scheduler with `publishOn` goes through the same scheduler error-handling path.
+
+The custom-thread-factory technique also works for the throwing HTTP callback
+in this repo:
 
 ```sh
 ./gradlew --no-daemon -q runNettyPublishOnSchedulerWithThread
