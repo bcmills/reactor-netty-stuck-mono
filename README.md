@@ -90,6 +90,12 @@ Each observes the error-delivery mechanism relevant to that case:
   supplies a `ThreadFactory` instead of using Core's named scheduler factory.
   Neither the subscriber nor `doFinally` receives a signal; the control checks
   that the handler received a `NoSuchMethodError`.
+- **With `publishOn` and an explicit thread handler**
+  (`src/main/java/CorePublishOnSchedulerWithThreadHandler.java`): a `ThreadFactory`
+  sets an uncaught-exception handler on each worker thread, then passes the
+  factory to `Schedulers.newSingle`. That handler receives `NoSuchMethodError`.
+  This case does not change the JVM default handler or register a global
+  scheduler hook. Neither the subscriber callbacks nor `doFinally` run.
 - **With `publishOn` and a scheduler error hook**
   (`src/main/java/CorePublishOnSchedulerErrorHook.java`): Core's named scheduler
   retains its usual logging handler, while a keyed `Schedulers.onHandleError`
@@ -105,6 +111,7 @@ To run a control separately:
 ./gradlew --no-daemon -q runCoreCreate
 ./gradlew --no-daemon -q runCorePublishOnSchedulerDefault
 ./gradlew --no-daemon -q runCorePublishOnSchedulerWithThread
+./gradlew --no-daemon -q runCorePublishOnSchedulerWithThreadHandler
 ./gradlew --no-daemon -q runCorePublishOnSchedulerErrorHook
 ```
 
@@ -116,6 +123,7 @@ core-defer signal=none doFinally=none thrown=true
 core-create signal=onError doFinally=onError
 core-publish-on signal=none doFinally=none uncaught=false
 core-publish-on-handler signal=none doFinally=none uncaught=true
+core-publish-on-thread-handler signal=none doFinally=none threadHandler=true
 core-publish-on-error-hook signal=none doFinally=none errorHook=true
 ```
 
@@ -234,6 +242,29 @@ that handler with the original fatal error. This is **handler notification**:
 the scheduler still catches the throw, the worker continues, and the Mono still
 does not terminate. It does not rethrow on the subscribing thread or inherently
 terminate the worker or process.
+
+The `CorePublishOnSchedulerWithThreadHandler` case configures the worker's
+handler explicitly:
+
+```java
+ThreadFactory threadFactory = task -> {
+    Thread thread = new Thread(task, "caller-worker");
+    thread.setUncaughtExceptionHandler((worker, error) -> {
+        // Report the error here.
+    });
+    return thread;
+};
+Scheduler scheduler = Schedulers.newSingle(threadFactory);
+```
+
+This uses public APIs. Core's own
+[`ReactorThreadFactory` and its constructor are package-private](https://github.com/reactor/reactor-core/blob/v3.8.7/reactor-core/src/main/java/reactor/core/scheduler/ReactorThreadFactory.java#L33-L48),
+so an application cannot directly instantiate it with a custom handler. The
+sample instead supplies its own factory and verifies that Core calls the
+worker's handler. As in the `WithThread` case, the handler returns and the
+scheduler continues running tasks; the subscription still does not terminate.
+This demonstrates a configurable way to report errors from a Reactor scheduler,
+not a way to intercept errors that Netty has already caught in its pipeline.
 
 For application-level scheduler error reporting, Reactor also provides
 [`Schedulers.onHandleError(key, hook)`](https://github.com/reactor/reactor-core/blob/v3.8.7/reactor-core/src/main/java/reactor/core/scheduler/Schedulers.java#L626-L650).
